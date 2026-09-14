@@ -4071,6 +4071,34 @@ const currentIngest = {};   // sku -> { 'YYYY-MM-DD': { pos, price } }
 // Frozen finals — once a past-date final is set from iTrade, it stays here permanently
 // so future uploads can't change it (clients don't modify past orders).
 const frozenFinals = {};    // sku -> { 'M/D/YYYY' (dateKey): { pos, price } }
+
+// -------------------- CONFIRMACIÓN POR DIVISIONES (fix iniciales) --------------------
+// Todas las divisiones posibles (letras de P.O). Una fecha+SKU se considera CONFIRMADA
+// cuando todas estas divisiones ya fueron cargadas como iniciales.
+const ALL_DIVISIONS = [L,J,M,A,O,G];
+// Registro de divisiones cargadas por fecha+SKU: sku -> { dateKey: Set(letras) }
+const divsLoadedByDate = {};
+// Fechas+SKU confirmadas (todas las divisiones completas, o marcadas como confirmadas
+// por ser datos preexistentes). sku -> Set(dateKey). NO se sobrescriben en initials mode.
+const confirmedDates = {};
+
+function isConfirmed(sku, dateKey){
+  return !!(confirmedDates[sku] && confirmedDates[sku].has(dateKey));
+}
+function markConfirmed(sku, dateKey){
+  if(!confirmedDates[sku]) confirmedDates[sku] = new Set();
+  confirmedDates[sku].add(dateKey);
+}
+function recordDivsLoaded(sku, dateKey, divSet){
+  if(!divsLoadedByDate[sku]) divsLoadedByDate[sku] = {};
+  if(!divsLoadedByDate[sku][dateKey]) divsLoadedByDate[sku][dateKey] = new Set();
+  divSet.forEach(d => divsLoadedByDate[sku][dateKey].add(d));
+  // ¿Ya están todas las divisiones? -> confirmar
+  const loaded = divsLoadedByDate[sku][dateKey];
+  if(ALL_DIVISIONS.every(d => loaded.has(d))){
+    markConfirmed(sku, dateKey);
+  }
+}
 const uploadHistory = [];   // [{ date, fileName, isInitial, totalRows }]
 const STORAGE_KEY = 'pg-state-v1';
 
@@ -4168,6 +4196,27 @@ async function loadAppState() {
       Object.assign(initialIngest, parsed.initialIngest || {});
       Object.assign(currentIngest, parsed.currentIngest || {});
       Object.assign(frozenFinals, parsed.frozenFinals || {});
+      // Restaurar confirmaciones por divisiones (fix iniciales)
+      if (parsed.confirmedDates) {
+        Object.entries(parsed.confirmedDates).forEach(([sku, arr]) => {
+          confirmedDates[sku] = new Set(arr);
+        });
+      }
+      if (parsed.divsLoadedByDate) {
+        Object.entries(parsed.divsLoadedByDate).forEach(([sku, dates]) => {
+          divsLoadedByDate[sku] = {};
+          Object.entries(dates).forEach(([d, arr]) => { divsLoadedByDate[sku][d] = new Set(arr); });
+        });
+      }
+      // MIGRACIÓN: datos preexistentes en initialIngest se consideran CONFIRMADOS
+      // (decisión del usuario: todo lo que ya existe queda protegido).
+      Object.entries(initialIngest).forEach(([sku, days]) => {
+        Object.keys(days).forEach(dateKey => {
+          if (!parsed.confirmedDates || !(parsed.confirmedDates[sku] && parsed.confirmedDates[sku].includes(dateKey))) {
+            markConfirmed(sku, dateKey);
+          }
+        });
+      });
       if (parsed.uploadHistory) { uploadHistory.length = 0; uploadHistory.push(...parsed.uploadHistory); }
       // Restore raw rows (cleaned iTrade data)
       if (parsed.rawRows && parsed.rawRows.length) {
@@ -4213,6 +4262,8 @@ async function saveAppState() {
       fileName: appState.fileName || '',
       isInitialUpload: !!appState.isInitialUpload,
       openPOsPending: serializeRawRows(appState.openPOsPending || []),
+      confirmedDates: Object.fromEntries(Object.entries(confirmedDates).map(([k,v])=>[k,[...v]])),
+      divsLoadedByDate: Object.fromEntries(Object.entries(divsLoadedByDate).map(([sku,dates])=>[sku, Object.fromEntries(Object.entries(dates).map(([d,set])=>[d,[...set]]))])),
     });
     await appStorage.set(STORAGE_KEY, payload);
   } catch (err) {
@@ -4226,6 +4277,8 @@ async function clearITradeData() {
   Object.keys(initialIngest).forEach(k => delete initialIngest[k]);
   Object.keys(currentIngest).forEach(k => delete currentIngest[k]);
   Object.keys(frozenFinals).forEach(k => delete frozenFinals[k]);
+  Object.keys(confirmedDates).forEach(k => delete confirmedDates[k]);
+  Object.keys(divsLoadedByDate).forEach(k => delete divsLoadedByDate[k]);
   uploadHistory.length = 0;
   appState.rawRows = [];
   appState.validations = null;
@@ -5023,6 +5076,17 @@ function processData(rawRows, opts = {}) {
           // Check product-type filter
           const prodOk = skuMatchesProdType(sku);
           if (divOk && prodOk) {
+            // === FIX INICIALES: no sobrescribir fechas ya CONFIRMADAS ===
+            // Una fecha+SKU confirmada (todas sus divisiones cargadas, o preexistente)
+            // no se vuelve a tocar en initials mode. Excepción: items promo-split,
+            // donde promo y every-day son cubos separados (se maneja más abajo con keepPromo).
+            if (isConfirmed(sku, dateKey) && !PROMO_SPLIT_SKUS[sku]) {
+              return; // fecha bloqueada: no modificar inicial
+            }
+            // Registrar qué divisiones se cargan ahora para esta fecha+SKU.
+            // Si no hay filtro de divisiones, se cargan todas de una vez.
+            const divsNow = initialsDivs ? new Set([...initialsDivs]) : new Set(ALL_DIVISIONS);
+            recordDivsLoaded(sku, dateKey, divsNow);
             if (initialsDivs) {
               // Division-filtered upload: rebuild initial from all rawRows for this date+sku.
               // Sum non-filtered divs from rawRows + filtered divs from rawRows.
