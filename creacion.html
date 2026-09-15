@@ -4075,7 +4075,7 @@ const frozenFinals = {};    // sku -> { 'M/D/YYYY' (dateKey): { pos, price } }
 // -------------------- CONFIRMACIÓN POR DIVISIONES (fix iniciales) --------------------
 // Todas las divisiones posibles (letras de P.O). Una fecha+SKU se considera CONFIRMADA
 // cuando todas estas divisiones ya fueron cargadas como iniciales.
-const ALL_DIVISIONS = [L,J,M,A,O,G];
+const ALL_DIVISIONS = ['L','J','M','A','O','G'];
 // Registro de divisiones cargadas por fecha+SKU: sku -> { dateKey: Set(letras) }
 const divsLoadedByDate = {};
 // Fechas+SKU confirmadas (todas las divisiones completas, o marcadas como confirmadas
